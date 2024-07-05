@@ -166,12 +166,13 @@ def process_video(args):
     # Get video duration
     duration = float(format_info['duration'])
     
-    # Calculate the number of frames to keep
-    max_frames = int(fps * args.max_duration)
+    # Use the specified max_duration or the full duration of the video
+    max_duration = duration if args.max_duration == -1 else min(args.max_duration, duration)
+    max_frames = int(fps * max_duration)
     
     # Calculate start and end frames
     start_frame = 0
-    end_frame = min(int(duration * fps), max_frames)
+    end_frame = max_frames
 
     model_manager = ModelManager(torch_dtype=torch.float16, device="cuda")
     model_manager.load_textual_inversions("models/textual_inversion")
@@ -225,13 +226,13 @@ def process_video(args):
     
     save_video_with_audio(output_video, args.output, fps, args.input, args.keep_audio, start_frame, end_frame, args.save_original)
 
-    return new_width, new_height, fps, min(duration, args.max_duration)
+    return new_width, new_height, fps, max_duration
 
 def main():
     parser = argparse.ArgumentParser(description="Video Processing Script")
     parser.add_argument("-i", "--input", required=True, help="Path to input video")
     parser.add_argument("-o", "--output", required=True, help="Path for output video")
-    parser.add_argument("--prompt", default="masterpiece, best quality, perfect anime illustration, perfect anime still frame, light, solo", help="Prompt for video generation")
+    parser.add_argument("--prompt", default="masterpiece, best quality, perfect anime illustration, perfect anime still frame, light", help="Prompt for video generation")
     parser.add_argument("--negative_prompt", default="verybadimagenegative_v1.3", help="Negative prompt for video generation")
     parser.add_argument("--cfg_scale", type=float, default=3, help="CFG scale")
     parser.add_argument("--clip_skip", type=int, default=2, help="Clip skip value")
@@ -245,7 +246,7 @@ def main():
     parser.add_argument("--keep_audio", action="store_true", default=True, help="Keep original audio (default: True)")
     parser.add_argument("--download_models", action="store_true", help="Download required models")
     parser.add_argument("--max_side", type=int, default=1024, help="Maximum side length for the output video")
-    parser.add_argument("--max_duration", type=float, default=10, help="Maximum duration of the output video in seconds")
+    parser.add_argument("--max_duration", type=float, default=-1, help="Maximum duration of the output video in seconds (default: -1, use full video duration)")
     parser.add_argument("--save_original", action="store_true", help="Save the original processed video without audio")
     
     args = parser.parse_args()
