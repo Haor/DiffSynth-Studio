@@ -7,7 +7,9 @@ import cv2
 import subprocess
 import json
 import math
-from diffsynth import ModelManager, SDVideoPipeline, ControlNetConfigUnit, VideoData, save_video
+import numpy as np
+from PIL import Image
+from diffsynth import ModelManager, SDVideoPipeline, ControlNetConfigUnit, save_video
 from diffsynth.extensions.RIFE import RIFESmoother
 from moviepy.editor import VideoFileClip, AudioFileClip
 
@@ -116,63 +118,111 @@ def save_video_with_audio(frames, output_path, fps, original_video_path, keep_au
         else:
             print("Error occurred while processing the video. No output was saved.")
 
+def preprocess_video(input_path, target_size):
+    # Open the video file
+    cap = cv2.VideoCapture(input_path)
+    
+    # Get video properties
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Get rotation information
+    rotation_meta = cap.get(cv2.CAP_PROP_ORIENTATION_META)
+    rotation = 0
+    if rotation_meta == 6:
+        rotation = 90
+    elif rotation_meta == 3:
+        rotation = 180
+    elif rotation_meta == 8:
+        rotation = 270
+    
+    # Swap width and height if video is rotated 90 or 270 degrees
+    if rotation in [90, 270]:
+        width, height = height, width
+    
+    # Calculate new dimensions
+    aspect_ratio = width / height
+    if width > height:
+        new_width = min(width, target_size)
+        new_height = int(new_width / aspect_ratio)
+    else:
+        new_height = min(height, target_size)
+        new_width = int(new_height * aspect_ratio)
+    
+    # Ensure dimensions are multiples of 64
+    new_width = (new_width // 64) * 64
+    new_height = (new_height // 64) * 64
+    
+    preprocessed_frames = []
+    
+    for _ in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Rotate frame if needed
+        if rotation == 90:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif rotation == 180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        elif rotation == 270:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        # Resize frame
+        frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # Convert BGR to RGB
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image
+        pil_image = Image.fromarray(frame)
+        
+        preprocessed_frames.append(pil_image)
+    
+    cap.release()
+    
+    print(f"Preprocessed video: {len(preprocessed_frames)} frames, size: {new_width}x{new_height}, FPS: {fps}")
+    
+    return preprocessed_frames, new_width, new_height, fps
+
 def process_video(args):
     if not os.path.exists(args.input):
         raise FileNotFoundError(f"Input file not found: {args.input}")
 
-    # Get video information
+    # Preprocess video
+    preprocessed_frames, new_width, new_height, original_fps = preprocess_video(args.input, args.max_side)
+    
+    # Get video info
     video_stream, format_info = get_video_info(args.input)
+    original_duration = float(format_info['duration'])
     
-    # Get original width and height
-    width = int(video_stream['width'])
-    height = int(video_stream['height'])
-    
-    # Calculate aspect ratio
-    aspect_ratio = width / height
-    
-    # Calculate new width and height, maintaining aspect ratio, with long side as max_side
-    max_side = args.max_side
-    if width > height:  # Landscape video
-        new_width = max_side
-        new_height = int(new_width / aspect_ratio)
-    else:  # Portrait video
-        new_height = max_side
-        new_width = int(new_height * aspect_ratio)
-    
-    # Ensure width and height are multiples of 64
-    new_width = math.floor(new_width / 64) * 64
-    new_height = math.floor(new_height / 64) * 64
-    
-    # Recalculate aspect ratio after rounding
-    new_aspect_ratio = new_width / new_height
-    
-    # Adjust dimensions to maintain aspect ratio if needed
-    if abs(new_aspect_ratio - aspect_ratio) > 0.01:  # Allow 1% tolerance
-        if width > height:
-            new_height = math.floor(new_width / aspect_ratio / 64) * 64
-        else:
-            new_width = math.floor(new_height * aspect_ratio / 64) * 64
-    
-    # Final check to ensure both dimensions are multiples of 64
-    new_width = max(64, math.floor(new_width / 64) * 64)
-    new_height = max(64, math.floor(new_height / 64) * 64)
-    
-    # Get original frame rate
-    original_fps = eval(video_stream['r_frame_rate'])
-    
-    # Set frame rate to target_fps
-    fps = args.fps or original_fps
-    
-    # Get video duration
-    duration = float(format_info['duration'])
-    
-    # Use the specified max_duration or the full duration of the video
-    max_duration = duration if args.max_duration == -1 else min(args.max_duration, duration)
-    max_frames = int(fps * max_duration)
-    
-    # Calculate start and end frames
-    start_frame = 0
-    end_frame = max_frames
+    # Determine target duration
+    target_duration = original_duration if args.max_duration == -1 else min(args.max_duration, original_duration)
+
+    # Determine target fps, respecting original fps if it's lower
+    target_fps = min(args.fps, original_fps) if args.fps else original_fps
+
+    # Calculate the number of frames in the target duration at original fps
+    frames_in_target_duration = int(target_duration * original_fps)
+
+    # Truncate frames if necessary
+    preprocessed_frames = preprocessed_frames[:frames_in_target_duration]
+
+    # Calculate the number of frames needed at the target fps
+    target_frame_count = int(target_duration * target_fps)
+
+    # Perform frame sampling only if we need to reduce frames
+    if target_frame_count < len(preprocessed_frames):
+        indices = np.linspace(0, len(preprocessed_frames) - 1, target_frame_count, dtype=int)
+        preprocessed_frames = [preprocessed_frames[i] for i in indices]
+
+    final_frame_count = len(preprocessed_frames)
+    final_duration = final_frame_count / target_fps
+
+    print(f"Original video: {frames_in_target_duration} frames, {original_duration:.2f}s, {original_fps:.2f} fps")
+    print(f"Processed video: {final_frame_count} frames, {final_duration:.2f}s, {target_fps:.2f} fps")
 
     model_manager = ModelManager(torch_dtype=torch.float16, device="cuda")
     model_manager.load_textual_inversions("models/textual_inversion")
@@ -202,17 +252,14 @@ def process_video(args):
     
     smoother = RIFESmoother.from_model_manager(model_manager)
     
-    video = VideoData(video_file=args.input, height=new_height, width=new_width)
-    input_video = [video[i] for i in range(start_frame, end_frame)]
-    
     torch.manual_seed(args.seed)
     output_video = pipe(
         prompt=args.prompt,
         negative_prompt=args.negative_prompt,
         cfg_scale=args.cfg_scale,
         clip_skip=args.clip_skip,
-        controlnet_frames=input_video,
-        num_frames=len(input_video),
+        controlnet_frames=preprocessed_frames,
+        num_frames=len(preprocessed_frames),
         num_inference_steps=args.steps,
         height=new_height,
         width=new_width,
@@ -224,9 +271,9 @@ def process_video(args):
     if args.use_rife:
         output_video = smoother(output_video)
     
-    save_video_with_audio(output_video, args.output, fps, args.input, args.keep_audio, start_frame, end_frame, args.save_original)
+    save_video_with_audio(output_video, args.output, target_fps, args.input, args.keep_audio, 0, final_frame_count, args.save_original)
 
-    return new_width, new_height, fps, max_duration
+    return new_width, new_height, target_fps, final_duration
 
 def main():
     parser = argparse.ArgumentParser(description="Video Processing Script")
